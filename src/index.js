@@ -21,9 +21,65 @@ const influx = new Influx.InfluxDB({
 
 createInfluxDatabase();
 
-const port = process.env.PORT || 7070;
+const dgram = require('dgram');
 
+const port = process.env.PORT || 7070;
+const server_udp = dgram.createSocket('udp4');
 const server = net.createServer();
+
+async function parse(data) {
+	try {
+		logger.debug('Received data', data.toString())
+		const { ip, port, username } = parser(data.toString())
+		logger.debug(`Parsed ${username} ${ip} ${port}`)
+
+		const ipLocation = await doApiCall(ip);
+
+		if (!ipLocation) {
+			logger.error('No data retrieved, cannot continue')
+			return
+		}
+
+		const geohashed = ngeohash.encode(ipLocation.lat, ipLocation.lon);
+		logger.debug(`Geohashing with lat: ${ipLocation.lat}, lon: ${ipLocation.lon}: ${geohashed}`)
+
+		// Remove lon and lat from tags
+		const { lon, lat, ...others } = ipLocation;
+
+		influx.writePoints([
+			{
+				measurement: 'geossh',
+				fields: {
+					value: 1
+				},
+				tags: {
+					geohash: geohashed,
+					username,
+					port,
+					ip,
+				location: `${ipLocation.regionName}, ${ipLocation.city}`,
+					...others
+				}
+			}
+		]);
+	} catch (e) {
+		logger.error('An error has occurred processing one connection:', e.message)
+	}
+}
+
+server_udp.on('message', (data, rinfo) => {
+		try {
+			parse(data);
+		} catch (e) {
+			logger.error('An error has occurred processing one connection:', e.message)
+		}
+});
+server_udp.on('listening', () => {
+	const address = server.address();
+	logger.info(`UDP Server is running on port ${address}:${port}.`);
+});
+server_udp.bind(port);
+
 
 server.on('connection', (socket) => {
 
@@ -33,40 +89,7 @@ server.on('connection', (socket) => {
 		try {
 			socket.end()
 
-			logger.debug('Received data', data.toString())
-
-			const { ip, port, username } = parser(data.toString())
-			logger.debug(`Parsed ${username} ${ip} ${port}`)
-
-			const ipLocation = await doApiCall(ip);
-
-			if (!ipLocation) {
-				logger.error('No data retrieved, cannot continue')
-				return
-			}
-
-			const geohashed = ngeohash.encode(ipLocation.lat, ipLocation.lon);
-			logger.debug(`Geohashing with lat: ${ipLocation.lat}, lon: ${ipLocation.lon}: ${geohashed}`)
-
-			// Remove lon and lat from tags
-			const { lon, lat, ...others } = ipLocation;
-
-			influx.writePoints([
-				{
-					measurement: 'geossh',
-					fields: {
-						value: 1
-					},
-					tags: {
-						geohash: geohashed,
-						username,
-						port,
-						ip,
-						location: `${ipLocation.regionName}, ${ipLocation.city}`,
-						...others
-					}
-				}
-			]);
+			parse(data);
 		} catch (e) {
 			logger.error('An error has occurred processing one connection:', e.message)
 		}
